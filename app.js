@@ -1,118 +1,13 @@
-const API="https://api.binance.com";
-let interval="4h";
-
-const $=id=>document.getElementById(id);
-document.querySelectorAll(".tab").forEach(b=>b.onclick=()=>{
-  document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));
-  b.classList.add("active"); interval=b.dataset.i; scan();
-});
-$("scan").onclick=scan;
-
-function num(v){const n=Number(v);return Number.isFinite(n)?n:null}
-function ema(a,p){if(a.length<p)return null;const k=2/(p+1);let e=a.slice(0,p).reduce((x,y)=>x+y,0)/p;for(let i=p;i<a.length;i++)e=a[i]*k+e*(1-k);return e}
-function sma(a,p){return a.length<p?null:a.slice(-p).reduce((x,y)=>x+y,0)/p}
-function pstdev(a){const m=a.reduce((x,y)=>x+y,0)/a.length;return Math.sqrt(a.reduce((s,x)=>s+(x-m)**2,0)/a.length)}
-function bbWidth(a,p=20){if(a.length<p)return null;const w=a.slice(-p),m=w.reduce((x,y)=>x+y,0)/p;return m?4*pstdev(w)/m:0}
-
-function adx(h,l,c,p=14){
- if(c.length<p*2+2)return null;
- const tr=[],pl=[],mi=[];
- for(let i=1;i<c.length;i++){
-   tr.push(Math.max(h[i]-l[i],Math.abs(h[i]-c[i-1]),Math.abs(l[i]-c[i-1])));
-   const up=h[i]-h[i-1],dn=l[i-1]-l[i];
-   pl.push(up>dn&&up>0?up:0); mi.push(dn>up&&dn>0?dn:0);
- }
- const dx=[];
- for(let i=p;i<tr.length;i++){
-   const atr=tr.slice(i-p,i).reduce((x,y)=>x+y,0)/p;if(!atr)continue;
-   const pi=100*(pl.slice(i-p,i).reduce((x,y)=>x+y,0)/p)/atr;
-   const ni=100*(mi.slice(i-p,i).reduce((x,y)=>x+y,0)/p)/atr;
-   const den=pi+ni;dx.push(den?100*Math.abs(pi-ni)/den:0);
- }
- return dx.length>=p?dx.slice(-p).reduce((x,y)=>x+y,0)/p:null;
-}
-
-function sidewayScore(c,h,l){
- if(c.length<30)return 0;
- const hi=Math.max(...h.slice(-30)),lo=Math.min(...l.slice(-30)),mid=(hi+lo)/2;
- const width=mid?(hi-lo)/mid:1;
- const slope=c[29]?(Math.abs(c.at(-1)-c.at(-30))/c.at(-30)):1;
- const av=adx(h,l,c)||50,bw=bbWidth(c)||1;
- const a=Math.max(0,Math.min(45,45*(1-width/.18)));
- const b=Math.max(0,Math.min(25,25*(1-slope/.12)));
- const d=Math.max(0,Math.min(20,20*(1-Math.max(0,av-12)/28)));
- const e=Math.max(0,Math.min(10,10*(1-bw/.20)));
- return Math.max(0,Math.min(100,Math.round(a+b+d+e)));
-}
-
-async function analyze(symbol){
- const r=await fetch(`${API}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=160`);
- if(!r.ok)throw new Error(`Kline ${r.status}`);
- const raw=await r.json(); if(!Array.isArray(raw)||raw.length<60)throw new Error("Kline");
- const h=[],l=[],c=[],v=[];
- for(const x of raw){h.push(num(x[2]));l.push(num(x[3]));c.push(num(x[4]));v.push(num(x[5]))}
- if([h,l,c,v].some(a=>a.some(x=>x===null)))throw new Error("Parse");
-
- const e7=ema(c,7),e25=ema(c,25),e99=ema(c,99),av=adx(h,l,c),bw=bbWidth(c);
- const res=Math.max(...h.slice(-21,-1)),sup=Math.min(...l.slice(-21,-1)),cur=c.at(-1);
- const side=sidewayScore(c,h,l),vb=sma(v.slice(0,-1),20)||0,vr=vb?v.at(-1)/vb:0;
- let pre=0;
- if(e25&&cur>e25)pre+=25;if(e7&&e25&&e7>e25)pre+=20;
- const ratio=cur/res;
- if(ratio>=.985)pre+=20;else if(ratio>=.97)pre+=12;
- if(vr>=1.2)pre+=20;else if(vr>=.9)pre+=10;
- if(av!==null&&av<25)pre+=10;pre=Math.min(100,pre);
- let br=0;
- if(cur>res)br+=60;else if(cur>=res*.995)br+=35;
- if(vr>=1.5)br+=25;else if(vr>=1.2)br+=15;
- if(e7&&e25&&cur>e7&&e7>e25)br+=15;br=Math.min(100,br);
- const radar=Math.round(.40*side+.35*pre+.25*br);
- return {symbol,radar,sideway:side,pre,breakout:br,support:sup,resistance:res,ema7:e7,ema25:e25,ema99:e99,adx:av,bb_width:bw,volume_ratio:vr};
-}
-
-async function scan(){
- $("status").textContent="Đang lấy Top 100 Binance…";
- $("opps").innerHTML=$("top").innerHTML=$("breaks").innerHTML="";
- try{
-   const r=await fetch(`${API}/api/v3/ticker/24hr`);if(!r.ok)throw Error("Binance ticker "+r.status);
-   const all=await r.json();
-   const pairs=all.filter(x=>x.symbol.endsWith("USDT")&&!/(UP|DOWN|BULL|BEAR)USDT$/.test(x.symbol)&&num(x.quoteVolume)!==null)
-     .sort((a,b)=>num(b.quoteVolume)-num(a.quoteVolume)).slice(0,100);
-   const results=[], errors=[];
-   let done=0;
-   const queue=[...pairs];
-   const worker=async()=>{while(queue.length){const t=queue.shift();try{results.push(await analyze(t.symbol))}catch(e){errors.push(t.symbol)}done++;$("status").textContent=`Đang quét ${done}/100…`}};
-   await Promise.all(Array.from({length:8},worker));
-   results.sort((a,b)=>b.radar-a.radar);
-   const opp=results.filter(x=>x.sideway>=75&&x.pre>=75&&x.breakout<80);
-   const br=results.filter(x=>x.breakout>=80);
-   $("status").textContent=`${results.length}/100 mã • ${errors.length} lỗi • ${interval.toUpperCase()}`;
-   $("opps").innerHTML=opp.length?opp.map(card).join(""):`<div class="empty">Chưa có mã đạt đủ 3 điều kiện.</div>`;
-   $("top").innerHTML=results.slice(0,20).map(card).join("")||`<div class="empty">Không có dữ liệu.</div>`;
-   $("breaks").innerHTML=br.slice(0,20).map(card).join("")||`<div class="empty">Chưa có breakout mạnh.</div>`;
- }catch(e){$("status").textContent="Lỗi: "+e.message;$("opps").innerHTML=`<div class="empty">Không kết nối được Binance. Kiểm tra Internet.</div>`}
-}
-
-function scoreClass(v){return v>=80?"hot":v>=65?"warn":"good"}
-function fmt(v){if(v==null)return "-";if(v>=100)return v.toFixed(2);if(v>=1)return v.toFixed(4);return v.toPrecision(6)}
-function card(x){return `<div class="card" onclick='show(${JSON.stringify(x)})'>
- <div class="top"><div class="sym">${x.symbol}</div><div class="radar ${scoreClass(x.radar)}">${x.radar}</div></div>
- <div class="scores">
-  <div class="box"><div class="lab">SIDEWAY</div><div class="val">${x.sideway}</div></div>
-  <div class="box"><div class="lab">PRE-BREAKOUT</div><div class="val">${x.pre}</div></div>
-  <div class="box"><div class="lab">BREAKOUT</div><div class="val">${x.breakout}</div></div>
- </div>
- <div class="meta"><div>Hỗ trợ <b>${fmt(x.support)}</b></div><div>Kháng cự <b>${fmt(x.resistance)}</b></div></div>
- </div>`}
-
-function m(a,b){return `<div class="metric"><span>${a}</span><b>${b??"-"}</b></div>`}
-function show(x){$("detail").style.display="block";$("detailBody").innerHTML=`<h2>${x.symbol}</h2><div class="grid">
- ${m("RADAR",x.radar)}${m("SIDEWAY",x.sideway)}${m("PRE-BREAKOUT",x.pre)}${m("BREAKOUT",x.breakout)}
- ${m("SUPPORT",fmt(x.support))}${m("RESISTANCE",fmt(x.resistance))}
- ${m("EMA 7",fmt(x.ema7))}${m("EMA 25",fmt(x.ema25))}${m("EMA 99",fmt(x.ema99))}
- ${m("ADX",x.adx==null?"-":x.adx.toFixed(2))}${m("BB WIDTH",x.bb_width==null?"-":x.bb_width.toFixed(5))}${m("VOLUME RATIO",x.volume_ratio==null?"-":x.volume_ratio.toFixed(2)+"x")}
- </div>`}
-function closeDetail(){$("detail").style.display="none"}
-
-if("serviceWorker" in navigator)navigator.serviceWorker.register("sw.js").catch(()=>{});
-scan();
+const API='https://api.binance.com';let TF='1h', rows=[], busy=false;
+const $=id=>document.getElementById(id); document.querySelectorAll('#tf button').forEach(b=>b.onclick=()=>{document.querySelectorAll('#tf button').forEach(x=>x.classList.remove('active'));b.classList.add('active');TF=b.dataset.tf;scan()});
+$('refresh').onclick=scan;$('limit').onchange=scan;$('minVol').onchange=scan;$('search').oninput=render;$('view').onchange=render;
+function ema(a,n){let k=2/(n+1),e=a[0];for(let i=1;i<a.length;i++)e=a[i]*k+e*(1-k);return e}
+function mean(a){return a.reduce((x,y)=>x+y,0)/a.length}function stdev(a){let m=mean(a);return Math.sqrt(mean(a.map(x=>(x-m)**2)))}
+function calc(k){let c=k.map(x=>+x[4]),h=k.map(x=>+x[2]),l=k.map(x=>+x[3]),v=k.map(x=>+x[5]);let p=c.at(-1), e7=ema(c,7),e25=ema(c,25),e99=ema(c,99), n=20, m=mean(c.slice(-n)),sd=stdev(c.slice(-n)), bw=(4*sd)/m*100, hi=Math.max(...h.slice(-50)),lo=Math.min(...l.slice(-50));let vr=mean(v.slice(-5))/mean(v.slice(-30));let tr=[],atr=0,plus=0,minus=0;for(let i=1;i<c.length;i++){let up=h[i]-h[i-1],dn=l[i-1]-l[i];tr.push(Math.max(h[i]-l[i],Math.abs(h[i]-c[i-1]),Math.abs(l[i]-c[i-1])));plus+=up>dn&&up>0?up:0;minus+=dn>up&&dn>0?dn:0}atr=mean(tr.slice(-14));let adx=100*Math.abs(plus-minus)/(plus+minus||1);let range=Math.max(hi-lo,p*.0001);let side=clamp(100-(bw*7)-Math.min(35,adx*.45)+Math.max(0,20-vr*8),0,100);let dist=Math.max(0,(hi-p)/range);let pre=clamp(side*.45+(1-Math.min(1,dist))*35+Math.min(20,Math.max(0,vr-1)*18)+(e7>e25?5:0),0,100);let br=clamp((p>hi*0.995?45:0)+(vr>=1.5?25:vr>=1.2?12:0)+(e7>e25?15:0)+(adx>25?15:0),0,100);let radar=Math.round(side*.4+pre*.35+br*.25);return{p,e7,e25,e99,bw,vr,adx,side,pre,br,radar,support:lo,resistance:hi}}
+const clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
+async function get(url){let r=await fetch(url);if(!r.ok)throw Error(r.status);return r.json()}
+async function scan(){if(busy)return;busy=true;$('status').textContent='Đang lấy Top coin...';rows=[];render();try{let info=await get(API+'/api/v3/exchangeInfo');let symbols=new Set(info.symbols.filter(s=>s.status==='TRADING'&&s.quoteAsset==='USDT'&&s.isSpotTradingAllowed&&!/UP|DOWN|BULL|BEAR/.test(s.baseAsset)).map(s=>s.symbol));let tick=await get(API+'/api/v3/ticker/24hr');let min=+$('minVol').value, lim=+$('limit').value;let top=tick.filter(x=>symbols.has(x.symbol)&&+x.quoteVolume>=min).sort((a,b)=>+b.quoteVolume-+a.quoteVolume).slice(0,lim);$('status').textContent=`Đang quét ${top.length} coin • ${TF}`;let out=[],done=0;for(let i=0;i<top.length;i+=8){let batch=top.slice(i,i+8);let got=await Promise.allSettled(batch.map(async t=>{let k=await get(`${API}/api/v3/klines?symbol=${t.symbol}&interval=${TF}&limit=120`);if(k.length<60)throw 0;return {...t,m:calc(k)}}));got.forEach((g,j)=>{if(g.status==='fulfilled')out.push(g.value)});done+=batch.length;$('status').textContent=`Đã quét ${Math.min(done,top.length)}/${top.length}`;rows=out.sort((a,b)=>b.m.radar-a.m.radar);render()}$('status').textContent=`Hoàn tất • ${rows.length} coin`;localStorage.setItem('sideway_v22',JSON.stringify({tf:TF,rows,time:Date.now()}))}catch(e){$('status').textContent='Lỗi kết nối Binance: '+e.message}busy=false}
+function render(){let q=$('search').value.toUpperCase(),v=$('view').value;let a=rows.filter(x=>x.symbol.includes(q)).filter(x=>v==='all'||v==='opportunity'?(x.m.side>=75&&x.m.pre>=75&&x.m.br<80):v==='accum'?x.m.side>=75:v==='pre'?x.m.pre>=75&&x.m.br<80:v==='breakout'?x.m.br>=80:v==='radar'?true:true);if(v==='radar')a=a.sort((x,y)=>y.m.radar-x.m.radar).slice(0,30);$('count').textContent=a.length+' coin';$('cards').innerHTML=a.length?a.map(x=>card(x)).join(''):'<div class="empty">Chưa có coin phù hợp bộ lọc.</div>'}
+function card(x){let m=x.m;let cls=m.br>=80?'hot':m.side>=75?'good':'';return `<article class="card ${cls}"><div class="top"><div><div class="sym">${x.symbol}</div><div class="price">${fmt(m.p)} USDT • Vol 24H ${fmtVol(+x.quoteVolume)}</div></div><b>RADAR ${m.radar}</b></div><div class="badges"><span class="badge">SIDE ${m.side.toFixed(0)}</span><span class="badge">PRE ${m.pre.toFixed(0)}</span><span class="badge">BREAK ${m.br.toFixed(0)}</span></div><div class="grid"><div class="metric"><b>${m.adx.toFixed(1)}</b><small>ADX</small></div><div class="metric"><b>${m.bw.toFixed(2)}%</b><small>BB Width</small></div><div class="metric"><b>${m.vr.toFixed(2)}x</b><small>Volume Ratio</small></div><div class="metric"><b>${fmt(m.e25)}</b><small>EMA25</small></div></div><div class="levels"><span>🟢 Hỗ trợ ${fmt(m.support)}</span><span>🔴 Cản ${fmt(m.resistance)}</span></div></article>`}
+function fmt(n){if(!isFinite(n))return'-';return n>=100? n.toFixed(2):n>=1?n.toFixed(4):n.toPrecision(5)}function fmtVol(n){return n>=1e9?(n/1e9).toFixed(1)+'B':n>=1e6?(n/1e6).toFixed(1)+'M':(n/1e3).toFixed(0)+'K'}
+try{let c=JSON.parse(localStorage.getItem('sideway_v22'));if(c&&c.rows){rows=c.rows;render()}}catch{}scan();
